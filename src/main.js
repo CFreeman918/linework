@@ -305,7 +305,7 @@ function setMode(m) {
   rubber?.setEnabled(m === "box");
   if (m !== "ports") portsCell = null;
   if (HINTS[m]) toast(HINTS[m], 2800);
-  drawOverlay(); updateBar();
+  drawOverlay(); updateBar(); renderPop();
 }
 document.querySelectorAll("[data-mode]").forEach((b) => b.onclick = () => setMode(b.dataset.mode));
 $("#tool-text").onclick = () => { setMode("select"); insertItem(LIB.basic.find((i) => i.n === "Text")); focusLabel(); };
@@ -594,6 +594,7 @@ function updateBar() {
   const one = cells.length === 1 ? cells[0] : null;
   const parts = [];
   if (one) parts.push(`<input type="text" id="label" placeholder="Label" aria-label="Label" value="${labelText(one).replace(/\n/g, " / ").replace(/"/g, "&quot;")}">`);
+  parts.push(`<button class="chip" type="button" id="b-style" aria-pressed="${popOpen}" aria-controls="pop">Style</button>`);
   if (one && one.isVertex()) {
     const cur = one.style?.fillColor ?? null;
     parts.push(`<span class="sep"></span>` + SWATCHES.map((s, k) => `<button class="sw" type="button" data-sw="${k}" title="${s.n} fill" aria-label="${s.n} fill" aria-pressed="${String(cur === s.v)}"
@@ -609,8 +610,7 @@ function updateBar() {
     parts.push(`<span class="sep"></span>` + [["end", "→"], ["both", "↔"], ["none", "—"]].map(([k, g]) => `<button class="chip" type="button" data-arrow="${k}" aria-pressed="${k === arrows}" aria-label="Arrows: ${k}">${g}</button>`).join(""));
   }
   if (cells.filter((c) => c.isVertex()).length > 1) parts.push(`<span class="sep"></span><button class="chip" type="button" id="b-arrange" aria-haspopup="menu">Arrange</button>`);
-  if (cells.length > 1 && cells.some((c) => c.isVertex())) parts.push(`<button class="chip" type="button" id="b-group">Make symbol</button>`);
-  parts.push(`<span class="sep"></span><button class="ib" type="button" id="b-dup" title="Duplicate" aria-label="Duplicate">${ic.dup}</button>`);
+  if (cells.length > 1 && cells.some((c) => c.isVertex())) parts.push(`<button class="chip" type="button" id="b-group">Make symbol</button>`);  parts.push(`<span class="sep"></span><button class="ib" type="button" id="b-dup" title="Duplicate" aria-label="Duplicate">${ic.dup}</button>`);
   parts.push(`<button class="ib" type="button" id="b-front" title="Bring to front" aria-label="Bring to front">${ic.front}</button>`);
   parts.push(`<button class="ib danger" type="button" id="b-del" title="Delete" aria-label="Delete">${ic.trash}</button>`);
   bar.innerHTML = parts.join("");
@@ -640,6 +640,7 @@ function updateBar() {
   $("#b-ports") && ($("#b-ports").onclick = () => { portsCell = one; setMode("ports"); });
   $("#b-rot") && ($("#b-rot").onclick = () => { const st = { ...one.style }; st.rotation = ((st.rotation || 0) + 90) % 360; model.setStyle(one, st); });
   $("#b-group") && ($("#b-group").onclick = makeSymbol);
+  $("#b-style").onclick = () => togglePop();
   $("#b-arrange") && ($("#b-arrange").onclick = (e) => { const r = e.currentTarget.getBoundingClientRect(); arrangeMenu(r.left, bar.getBoundingClientRect().top - 8, true); });
   $("#b-dup").onclick = duplicate;
   $("#b-front").onclick = () => graph.orderCells(false, graph.getSelectionCells());
@@ -728,8 +729,82 @@ function arrangeMenu(x, y, above = false) {
   ], above);
 }
 
-graph.getSelectionModel().addListener(InternalEvent.CHANGE, () => { if (mode === "ports" && !graph.isCellSelected(portsCell)) setMode("select"); else updateBar(); });
-model.addListener(InternalEvent.CHANGE, () => { scheduleSave(); syncUndo(); drawOverlay(); if (document.activeElement?.id !== "label" && document.activeElement?.id !== "symname") updateBar(); });
+/* ---------- style panel ---------- */
+const INKS = [
+  { n: "Default", v: null }, { n: "Grey", v: "#7D898C" }, { n: "Teal", v: "#0E7C8F" }, { n: "Amber", v: "#C98A12" },
+  { n: "Red", v: "#C44830" }, { n: "Green", v: "#3F8C50" }, { n: "Violet", v: "#6E5ABE" },
+];
+const LINES = [INKS[0], { n: "None", v: "none" }, ...INKS.slice(1)];
+const WIDTHS = [1, 1.5, 2.5, 4];
+const DASHES = [["solid", null], ["dashed", "4 3"], ["dotted", "1 2"]];
+const SIZES = [9, 10, 11, 12, 13, 14, 16, 18, 20, 24, 28, 36, 48];
+const ALIGNS = ["left", "center", "right"];
+const NO = "linear-gradient(135deg,transparent 45%,var(--danger) 46% 54%,transparent 55%)";
+let popOpen = false;
+const pop = document.createElement("div");
+Object.assign(pop, { className: "pop", id: "pop", hidden: true });
+pop.setAttribute("role", "dialog"); pop.setAttribute("aria-label", "Style");
+stage.appendChild(pop);
+
+function restyle(f) {
+  graph.batchUpdate(() => { for (const c of graph.getSelectionCells()) { const st = { ...c.style }; if (f(st, c) !== false) model.setStyle(c, st); } });
+}
+const setOrDel = (st, k, v) => { if (v === null) delete st[k]; else st[k] = v; };
+function swRow(key, label, list, cur, dflt) {
+  return `<div class="prow"><span class="plabel">${label}</span><div class="pset">${list.map((s, i) => `<button class="sw" type="button" data-k="${key}" data-i="${i}"
+    title="${s.n}" aria-label="${label}: ${s.n}" aria-pressed="${cur === s.v}" style="background:${s.v === null ? dflt : s.v === "none" ? NO : s.v}"></button>`).join("")}</div></div>`;
+}
+const row = (label, html) => `<div class="prow"><span class="plabel">${label}</span><div class="pset">${html}</div></div>`;
+function chip(key, i, pressed, inner, label) {
+  return `<button class="chip" type="button" data-k="${key}" data-i="${i}" aria-pressed="${pressed}" aria-label="${label}" title="${label}">${inner}</button>`;
+}
+function renderPop() {
+  const cells = graph.getSelectionCells();
+  if (!cells.length || mode !== "select") popOpen = false;
+  $("#b-style")?.setAttribute("aria-pressed", String(popOpen));
+  pop.hidden = !popOpen;
+  if (!popOpen) return;
+  const first = cells[0], raw = first.style || {}, eff = graph.getCellStyle(first);
+  const hasV = cells.some((c) => c.isVertex());
+  const width = +eff.strokeWidth || 1, fs = +eff.fontStyle || 0, size = +eff.fontSize || 12;
+  const dash = raw.dashed ? (raw.dashPattern === DASHES[2][1] ? "dotted" : "dashed") : "solid";
+  const line = (w, da = "") => `<svg viewBox="0 0 28 12" aria-hidden="true"><line x1="3" y1="6" x2="25" y2="6" stroke-width="${w}" ${da && `stroke-dasharray="${da}"`}/></svg>`;
+  const alignIc = (a) => `<svg viewBox="0 0 28 12" aria-hidden="true">${[[1, 22], [4, 14], [7, 18], [10, 12]].map(([y, w]) => {
+    const x = a === "left" ? 3 : a === "right" ? 25 - w : 14 - w / 2; return `<line x1="${x}" y1="${y}" x2="${x + w}" y2="${y}" stroke-width="1.6"/>`; }).join("")}</svg>`;
+  pop.innerHTML = [
+    hasV ? swRow("fill", "Fill", SWATCHES, raw.fillColor ?? null, "var(--shape-fill)") : "",
+    swRow("line", "Line", LINES, raw.strokeColor ?? null, "var(--ink)"),
+    row("Width", WIDTHS.map((w, i) => chip("width", i, w === width, line(w), `Line width ${w}`)).join("")),
+    row("Dash", DASHES.map(([n, p], i) => chip("dash", i, n === dash, line(1.6, p && p.split(" ").map((x) => x * 1.6).join(" ")), `${n[0].toUpperCase() + n.slice(1)} line`)).join("")),
+    swRow("font", "Text", INKS, raw.fontColor ?? null, "var(--ink)"),
+    row("Font", `${chip("size", -1, false, "A−", "Smaller text")}<span class="num" aria-label="Text size">${size}</span>${chip("size", 1, false, "A+", "Larger text")}
+      <span class="sep"></span>${chip("bold", 0, !!(fs & 1), "<b>B</b>", "Bold")}${chip("italic", 0, !!(fs & 2), "<i>I</i>", "Italic")}`),
+    hasV ? row("Align", ALIGNS.map((a, i) => chip("align", i, (eff.align || "center") === a, alignIc(a), `Align text ${a}`)).join("")) : "",
+  ].join("");
+}
+pop.addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-k]"); if (!b) return;
+  const k = b.dataset.k, i = +b.dataset.i;
+  const first = graph.getSelectionCells()[0]; if (!first) return;
+  const fs0 = +graph.getCellStyle(first).fontStyle || 0;
+  const flag = (bit) => { const on = !(fs0 & bit); restyle((st) => { const f = +st.fontStyle || 0; st.fontStyle = on ? f | bit : f & ~bit; }); };
+  if (k === "fill") restyle((st, c) => c.isVertex() ? setOrDel(st, "fillColor", SWATCHES[i].v) : false);
+  else if (k === "line") restyle((st) => setOrDel(st, "strokeColor", LINES[i].v));
+  else if (k === "font") restyle((st) => setOrDel(st, "fontColor", INKS[i].v));
+  else if (k === "width") restyle((st) => setOrDel(st, "strokeWidth", WIDTHS[i] === 1.5 ? null : WIDTHS[i]));
+  else if (k === "dash") restyle((st) => { const p = DASHES[i][1]; setOrDel(st, "dashed", p ? true : null); setOrDel(st, "dashPattern", p); });
+  else if (k === "size") restyle((st, c) => {
+    const cur = +graph.getCellStyle(c).fontSize || 12;
+    st.fontSize = i > 0 ? (SIZES.find((s) => s > cur) ?? cur) : ([...SIZES].reverse().find((s) => s < cur) ?? cur);
+  });
+  else if (k === "bold") flag(1);
+  else if (k === "italic") flag(2);
+  else if (k === "align") restyle((st, c) => c.isVertex() ? (st.align = ALIGNS[i], undefined) : false);
+});
+function togglePop(open = !popOpen) { popOpen = open; renderPop(); }
+
+graph.getSelectionModel().addListener(InternalEvent.CHANGE, () => { if (mode === "ports" && !graph.isCellSelected(portsCell)) setMode("select"); else updateBar(); renderPop(); });
+model.addListener(InternalEvent.CHANGE, () => { scheduleSave(); syncUndo(); drawOverlay(); if (document.activeElement?.id !== "label" && document.activeElement?.id !== "symname") updateBar(); renderPop(); });
 graph.addListener(InternalEvent.DOUBLE_CLICK, (_s, evt) => { const c = evt.getProperty("cell"); if (c) { graph.setSelectionCell(c); focusLabel(); } evt.consume?.(); });
 
 /* ---------- menus ---------- */
@@ -901,7 +976,7 @@ document.addEventListener("keydown", (e) => {
     nudge(e.key === "ArrowLeft" ? -d : e.key === "ArrowRight" ? d : 0, e.key === "ArrowUp" ? -d : e.key === "ArrowDown" ? d : 0);
   }
   else if (e.key === "Delete" || e.key === "Backspace") { removeSelection(); }
-  else if (e.key === "Escape") { closeMenus(); setMode("select"); graph.clearSelection(); }
+  else if (e.key === "Escape") { closeMenus(); togglePop(false); setMode("select"); graph.clearSelection(); }
   else if (e.key === "c" && !mod) setMode(mode === "connect" ? "select" : "connect");
 });
 

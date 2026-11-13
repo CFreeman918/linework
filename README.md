@@ -13,6 +13,8 @@ It runs on [maxGraph](https://github.com/maxGraph/maxGraph), the TypeScript succ
 - **Reusable symbols**: save any shape or group, with its connection points, to the **Mine** library. Multi-select shapes and tap **Make symbol** to combine them.
 - **Connectors**: elbow, straight, or curved routing, with arrowheads on either end. Connectors stay attached when shapes move.
 - **Labels**: free-floating text plus labels on every shape and connector.
+- **Styling**: tap **Style** to set fill, line color, width and dash, text color, size, bold/italic and alignment. Changes apply to everything selected.
+- **Editing**: copy, cut and paste, select all, nudge with arrow keys, align and distribute, and a snap-to-grid toggle.
 - **Files**: autosaves on the device, opens and saves `.linework` files, and exports SVG and PNG.
 
 ## Touch controls

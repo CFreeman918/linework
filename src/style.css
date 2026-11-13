@@ -109,6 +109,20 @@ div.mxRubberband { position: absolute; overflow: hidden; border: 1px solid var(-
 .ib.danger { color: var(--danger); }
 .hint { font-size: 13px; color: var(--muted); white-space: nowrap; padding: 0 6px; }
 
+/* Style panel: floats above the context bar */
+.pop[hidden] { display: none; }
+.pop { position: absolute; z-index: 5; left: 50%; transform: translateX(-50%); bottom: calc(84px + env(safe-area-inset-bottom, 0px));
+  width: max-content; max-width: calc(100% - 24px); box-sizing: border-box; max-height: calc(100% - 110px); overflow-y: auto;
+  background: var(--paper); border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow); padding: 10px 12px; display: grid; gap: 8px; }
+.prow { display: flex; align-items: center; gap: 10px; }
+.plabel { width: 40px; flex: none; font-size: 12px; color: var(--muted); }
+.pset { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.pset .sep { margin: 4px 2px; height: 28px; align-self: center; }
+.pop .sw { width: 30px; height: 30px; }
+.pop .chip { height: 36px; min-width: 40px; padding: 0 8px; display: grid; place-items: center; font-size: 14px; }
+.pop .chip svg { width: 28px; height: 12px; stroke: currentColor; fill: none; stroke-linecap: butt; }
+.pop .num { min-width: 26px; text-align: center; font-family: var(--f-mono); font-size: 13px; font-variant-numeric: tabular-nums; }
+
 .toast { position: absolute; z-index: 7; top: 12px; left: 50%; transform: translateX(-50%); background: var(--ink); color: var(--paper);
   padding: 8px 14px; border-radius: 999px; font-size: 13px; pointer-events: none; opacity: 0; transition: opacity .2s; max-width: calc(100% - 200px); text-align: center; }
 .toast.on { opacity: .94; }
