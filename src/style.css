@@ -17,24 +17,25 @@ body { margin: 0; font-size: 14px; }
   --shadow: 0 1px 2px rgba(20,30,32,.08), 0 6px 20px rgba(20,30,32,.10);
   --f-ui: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --f-mono: "IBM Plex Mono", ui-monospace, "Roboto Mono", Menlo, monospace;
+  --thumb-filter: none;
   --tap: 48px;
   --r: 12px;
 }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
   --canvas: #131718; --dot: #283033; --paper: #1B2022; --ink: #DCE3E2; --muted: #8B989A; --line: #2D3537;
   --accent: #4CC3D4; --accent-ink: #062A30; --accent-soft: rgba(76,195,212,0.14); --shape-fill: #1F2629; --danger: #E2775C;
-  --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.35); color-scheme: dark; } }
+  --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.35); --thumb-filter: invert(1) hue-rotate(180deg) brightness(.92); color-scheme: dark; } }
 :root[data-theme="dark"] {
   --canvas: #131718; --dot: #283033; --paper: #1B2022; --ink: #DCE3E2; --muted: #8B989A; --line: #2D3537;
   --accent: #4CC3D4; --accent-ink: #062A30; --accent-soft: rgba(76,195,212,0.14); --shape-fill: #1F2629; --danger: #E2775C;
-  --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.35); color-scheme: dark; }
+  --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.35); --thumb-filter: invert(1) hue-rotate(180deg) brightness(.92); color-scheme: dark; }
 
 html, body { height: 100%; }
 html { box-sizing: border-box; }
 body { background: var(--canvas); color: var(--ink); font-family: var(--f-ui); font-size: 14px; overflow: hidden;
   -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
 body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); z-index: 10; background: var(--paper); }
-.app { height: 100%; display: grid; grid-template-rows: auto 1fr; }
+.app { height: 100%; display: grid; grid-template-rows: auto 1fr; grid-template-columns: minmax(0, 1fr); }
 
 header { display: flex; align-items: center; gap: 8px; padding-block: 6px; padding-left: max(16px, env(safe-area-inset-left, 0px));
   padding-right: max(16px, env(safe-area-inset-right, 0px)); background: var(--paper); border-bottom: 1px solid var(--line); position: relative; z-index: 6; }
@@ -141,7 +142,7 @@ div.mxRubberband { position: absolute; overflow: hidden; border: 1px solid var(-
 .sheet .row { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
 
 @media (max-width: 700px) {
-  .drawer { left: max(12px, env(safe-area-inset-left, 0px)); right: max(12px, env(safe-area-inset-right, 0px)); width: auto; top: auto; height: 46%; bottom: calc(80px + env(safe-area-inset-bottom, 0px)); }
+  .drawer { left: max(12px, env(safe-area-inset-left, 0px)); right: max(12px, env(safe-area-inset-right, 0px)); width: auto; top: auto; height: 46%; bottom: calc(80px + env(safe-area-inset-bottom, 0px)); z-index: 5; }
   .drawer.closed { transform: translateY(16px); }
   .tiles { grid-template-columns: repeat(auto-fill, minmax(64px, 1fr)); }
   .rail.left { flex-direction: column; }
@@ -149,3 +150,25 @@ div.mxRubberband { position: absolute; overflow: hidden; border: 1px solid var(-
   .brand span { display: none; }
 }
 @media (prefers-reduced-motion: reduce) { .drawer, .toast { transition: none; } }
+
+/* Library thumbnails and action tiles */
+.tile img.thumb { width: 38px; height: 28px; object-fit: contain; filter: var(--thumb-filter); pointer-events: none; }
+.tile.action { border-style: dashed; background: transparent; cursor: pointer; }
+.tile.action svg { stroke: var(--accent); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.tile.action small { color: var(--ink); }
+.field { font: inherit; font-size: 16px; height: 46px; border: 1px solid var(--line); border-radius: 10px; background: var(--canvas); color: var(--ink);
+  padding: 0 12px; -webkit-user-select: text; user-select: text; }
+.field:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+
+/* Symbol editor: header controls replace the brand; canvas gets a frame and tint */
+.edhead { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; }
+.edtag { font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--accent-ink); background: var(--accent);
+  border-radius: 6px; padding: 3px 7px; flex: none; }
+#edname { font: inherit; font-size: 15px; height: 40px; width: 0; min-width: 0; flex: 1; max-width: 280px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--canvas); color: var(--ink); padding: 0 10px; -webkit-user-select: text; user-select: text; }
+#edname:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.edhead .txtbtn { height: 40px; }
+body.editing #graph { background-color: color-mix(in srgb, var(--canvas) 88%, var(--accent)); }
+body.editing [data-mode="connect"] { display: none; }
+#overlay .symframe { fill: none; stroke: var(--accent); stroke-width: 1.5; stroke-dasharray: 3 5; opacity: .7; }
+@media (max-width: 700px) { .edtag { display: none; } }

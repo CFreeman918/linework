@@ -9,6 +9,7 @@ import {
   ModelXmlSerializer, RubberBandHandler, getDefaultPlugins, ConstraintHandler, ImageBox,
   HandleConfig, VertexHandlerConfig, EdgeHandlerConfig, Clipboard
 } from "@maxgraph/core";
+import { svgToSymbol, stencilFromPaths, arcToCubics } from "./svg-import.js";
 
 /* ---------- helpers ---------- */
 const $ = (s, r = document) => r.querySelector(s);
@@ -56,6 +57,38 @@ const STENCILS = {
 for (const [name, xml] of Object.entries(STENCILS)) {
   const el = new DOMParser().parseFromString(xml, "text/xml").documentElement;
   StencilShapeRegistry.add(name, new StencilShape(el));
+}
+/* "Ink" fills: <fillcolor color="stroke"/> paints with the cell's line colour,
+   so dark-filled parts of imported SVGs follow the theme. */
+const drawNode0 = StencilShape.prototype.drawNode;
+StencilShape.prototype.drawNode = function (canvas, shape, node, ...rest) {
+  if (node.nodeName === "fillcolor" && node.getAttribute("color") === "stroke") { canvas.setFillColor(shape.stroke); return; }
+  return drawNode0.call(this, canvas, shape, node, ...rest);
+};
+
+/* Custom stencils (drawn shapes, imported SVGs) are content-addressed as "lw-<hash>",
+   kept in localStorage, and embedded in exported diagram XML inside <lwStencils>. */
+const STENCIL_KEY = "linework.stencils.v1";
+const custom = new Map();
+function registerStencil(name, xml) {
+  if (!/^lw-[a-z0-9]+$/.test(name || "") || custom.get(name) === xml) return;
+  const el = new DOMParser().parseFromString(xml, "text/xml").documentElement;
+  if (!el || el.nodeName !== "shape") return;
+  StencilShapeRegistry.add(name, new StencilShape(el));
+  custom.set(name, xml);
+}
+function hash(s, h = 0x811c9dc5) { for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193); } return (h >>> 0).toString(36); }
+function saveStencils() { store.set(STENCIL_KEY, JSON.stringify(Object.fromEntries(custom))); }
+function addStencil(xml) { const name = `lw-${hash(xml)}${hash(xml, 0x9e3779b9)}`; registerStencil(name, xml); saveStencils(); return name; }
+try { for (const [n, x] of Object.entries(JSON.parse(store.get(STENCIL_KEY) || "{}"))) registerStencil(n, x); } catch { /* ignore corrupt store */ }
+const escXml = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+/** Pull an <lwStencils> block out of diagram XML, registering what it holds. */
+function takeStencils(xml) {
+  const m = /<lwStencils>[\s\S]*?<\/lwStencils>/.exec(xml);
+  if (!m) return xml;
+  new DOMParser().parseFromString(m[0], "text/xml").querySelectorAll("stencil").forEach((s) => registerStencil(s.getAttribute("name"), s.textContent));
+  saveStencils();
+  return xml.replace(m[0], "");
 }
 
 /* ---------- library ---------- */
@@ -137,8 +170,9 @@ for (const m of ["update", "redraw", "setFocus"]) {
 const parsePorts = (s) => String(s).split(";").filter(Boolean).map((p) => p.split(",").map(Number)).filter((p) => p.length === 2 && p.every(Number.isFinite));
 const fmtPorts = (arr) => arr.map(([x, y]) => `${+x.toFixed(3)},${+y.toFixed(3)}`).join(";");
 const SIDES = [[0.5, 0], [1, 0.5], [0.5, 1], [0, 0.5]];
+const isPort = (c) => !!c?.style?.lwPort; // connection-point marker inside the symbol editor
 function constraintsFor(state) {
-  if (!state || !state.cell || !state.cell.isVertex()) return null;
+  if (!state || !state.cell || !state.cell.isVertex() || isPort(state.cell)) return null;
   const st = state.cell.style || {};
   if (st.fillColor === "none" && st.strokeColor === "none" && !st.ports && !state.cell.getChildCount()) return null;
   if (st.ports) return parsePorts(st.ports).map(([x, y]) => new ConnectionConstraint(new Point(x, y), false));
@@ -185,11 +219,23 @@ $("#undo").onclick = () => { undo.undo(); syncUndo(); };
 $("#redo").onclick = () => { undo.redo(); syncUndo(); };
 
 /* Save */
+/** Diagram XML plus the custom stencils its cells use. */
+function exportXml() {
+  const xml = new ModelXmlSerializer(model).export();
+  const used = new Set();
+  for (const c of Object.values(model.cells || {})) { const s = c.style?.shape; if (s && custom.has(s)) used.add(s); }
+  if (!used.size) return xml;
+  const block = `<lwStencils>${[...used].map((n) => `<stencil name="${n}">${escXml(custom.get(n))}</stencil>`).join("")}</lwStencils>`;
+  return xml.replace(/(<\/[A-Za-z]+>\s*)$/, block + "$1");
+}
 let saveT;
+let editing = null; // symbol-editor session; autosave pauses while it is open
+function flushSave() { clearTimeout(saveT); if (!editing) store.set(DOC_KEY, exportXml()); }
 function scheduleSave() {
   clearTimeout(saveT);
+  if (editing) return;
   saveT = setTimeout(() => {
-    try { const ok = store.set(DOC_KEY, new ModelXmlSerializer(model).export()); $("#status").textContent = ok ? "Saved on this device" : "Not saved: storage unavailable"; }
+    try { const ok = store.set(DOC_KEY, exportXml()); $("#status").textContent = ok ? "Saved on this device" : "Not saved: storage unavailable"; }
     catch (err) { $("#status").textContent = "Save failed"; console.warn(err); }
   }, 500);
 }
@@ -199,7 +245,7 @@ const stage = $("#stage");
 function local(e) { const r = container.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; }
 function toGraph(p) { const s = view.scale, t = view.translate; return { x: p.x / s - t.x, y: p.y / s - t.y }; }
 function viewCenter() { return toGraph({ x: container.clientWidth / 2, y: container.clientHeight / 2 }); }
-const snap = (n) => snapOn ? Math.round(n / 10) * 10 : Math.round(n);
+const snap = (n) => { const g = graph.getGridSize(); return snapOn ? Math.round(n / g) * g : Math.round(n); };
 function setSnap(on) {
   snapOn = on; graph.setGridEnabled(on); store.set(SNAP_KEY, on ? "1" : "0");
   container.classList.toggle("nosnap", !on);
@@ -213,25 +259,55 @@ function insertItem(item, at) {
   const c = at || (() => { const vc = viewCenter(); placeOffset = (placeOffset + 20) % 100; return { x: vc.x + placeOffset - 40, y: vc.y + placeOffset - 40 }; })();
   const x = snap(c.x - item.w / 2), y = snap(c.y - item.h / 2);
   let cell;
-  graph.batchUpdate(() => {
-    const parent = graph.getDefaultParent();
-    if (item.parts && item.parts.length > 1) {
-      cell = graph.insertVertex({ parent, value: "", x, y, width: item.w, height: item.h, style: { fillColor: "none", strokeColor: "none", ports: item.ports } });
-      for (const p of item.parts) graph.insertVertex({ parent: cell, value: p.v, x: p.x, y: p.y, width: p.w, height: p.h, style: { ...p.s } });
-    } else if (item.parts) {
-      const p = item.parts[0];
-      cell = graph.insertVertex({ parent, value: p.v, x, y, width: item.w, height: item.h, style: { ...p.s, ...(item.ports ? { ports: item.ports } : {}) } });
-    } else {
-      cell = graph.insertVertex({ parent, value: item.v, x, y, width: item.w, height: item.h, style: { ...item.s } });
-    }
-  });
+  graph.batchUpdate(() => { cell = addItemCells(graph, graph.getDefaultParent(), item, x, y); });
   graph.setSelectionCell(cell);
   return cell;
+}
+/** Insert a library item (built-in or saved symbol) into graph `g`; returns the top cell. */
+function addItemCells(g, parent, item, x, y) {
+  if (item.parts && item.parts.length > 1) {
+    const cell = g.insertVertex({ parent, value: "", x, y, width: item.w, height: item.h, style: { fillColor: "none", strokeColor: "none", ports: item.ports } });
+    for (const p of item.parts) g.insertVertex({ parent: cell, value: p.v, x: p.x, y: p.y, width: p.w, height: p.h, style: { ...p.s } });
+    return cell;
+  }
+  if (item.parts) {
+    const p = item.parts[0];
+    return g.insertVertex({ parent, value: p.v, x, y, width: item.w, height: item.h, style: { ...p.s, ...(item.ports ? { ports: item.ports } : {}) } });
+  }
+  return g.insertVertex({ parent, value: item.v, x, y, width: item.w, height: item.h, style: { ...item.s } });
+}
+
+/* Library thumbnails: render the item in an offscreen graph with fixed light colours
+   (CSS inverts them in dark mode) and keep the SVG as a data URI on the item. */
+let thumbG = null;
+function itemThumb(item) {
+  if (!thumbG) {
+    const host = document.createElement("div");
+    host.style.cssText = "position:fixed;left:-9999px;top:0;width:400px;height:400px;overflow:hidden;visibility:hidden;pointer-events:none";
+    document.body.appendChild(host);
+    thumbG = new Graph(host, undefined, []);
+    thumbG.setTooltips(false);
+  }
+  const g = thumbG;
+  Object.assign(g.getStylesheet().getDefaultVertexStyle(), { fillColor: "#FFFFFF", strokeColor: "#1D2528", fontColor: "#1D2528",
+    strokeWidth: Math.max(1.5, Math.max(item.w, item.h) / 40), fontFamily: "IBM Plex Sans, system-ui, sans-serif", fontSize: 13, whiteSpace: "wrap", spacing: 4 });
+  try {
+    g.batchUpdate(() => { g.removeCells(g.getChildCells(g.getDefaultParent()), true); addItemCells(g, g.getDefaultParent(), item, 0, 0); });
+    const src = g.container.querySelector("svg"), b = g.getGraphBounds();
+    if (!src || !b || !b.width) return null;
+    const svg = src.cloneNode(true), pad = 3;
+    svg.removeAttribute("style");
+    svg.setAttribute("xmlns", SVGNS);
+    svg.setAttribute("viewBox", `${b.x - pad} ${b.y - pad} ${b.width + 2 * pad} ${b.height + 2 * pad}`);
+    svg.setAttribute("width", Math.round(b.width + 2 * pad)); svg.setAttribute("height", Math.round(b.height + 2 * pad));
+    return "data:image/svg+xml," + encodeURIComponent(new XMLSerializer().serializeToString(svg));
+  } catch (err) { console.warn(err); return null; }
 }
 
 /* ---------- library drawer ---------- */
 let cat = "basic";
 function tileSvg(item) {
+  if (item.thumb) return `<img class="thumb" src="${item.thumb}" alt="" draggable="false">`;
   if (item.i) {
     const pts = (item.pts || []).map(([x, y]) => `<circle class="pt" cx="${x}" cy="${y}" r="2.4"/>`).join("");
     return `<svg viewBox="0 0 38 28" aria-hidden="true">${item.i}${pts}</svg>`;
@@ -244,7 +320,18 @@ function renderTiles() {
   const box = $("#tiles");
   const items = cat === "mine" ? loadMine() : LIB[cat];
   box.innerHTML = "";
-  if (!items.length) { box.innerHTML = `<p class="empty">No saved symbols yet. Select a shape or a group, open <b>Points</b>, then <b>Save to library</b>.</p>`; return; }
+  if (cat === "mine") {
+    for (const [label, icon, f] of [["New symbol", ic.plus, () => openEditor(null, { kind: "new" })], ["Import SVG", ic.importSvg, importSvgFiles]]) {
+      const b = document.createElement("button");
+      b.className = "tile action"; b.type = "button"; b.innerHTML = `${icon}<small>${label}</small>`; b.onclick = f;
+      box.appendChild(b);
+    }
+    // Older saved symbols have no thumbnail yet
+    let changed = false;
+    for (const it of items) if (it.thumb === undefined) { it.thumb = itemThumb(it) || ""; changed = true; }
+    if (changed) saveMine(items);
+  }
+  if (!items.length) { box.insertAdjacentHTML("beforeend", `<p class="empty">No saved symbols yet. Draw one with <b>New symbol</b>, import an SVG, or select shapes on the canvas and choose <b>Save to library</b>.</p>`); return; }
   items.forEach((item, idx) => {
     const b = document.createElement("button");
     b.className = "tile"; b.type = "button"; b.title = item.n; b.setAttribute("aria-label", "Add " + item.n);
@@ -263,6 +350,7 @@ $("#tool-shapes").onclick = () => setDrawer($("#drawer").classList.contains("clo
 
 function attachTileDrag(el, item, idx) {
   let start = null, ghost = null, lp = null;
+  if (cat === "mine") el.addEventListener("contextmenu", (e) => { e.preventDefault(); if (lp) { clearTimeout(lp); lp = null; } start = null; mineMenu(e, idx); });
   el.addEventListener("pointerdown", (e) => {
     start = { x: e.clientX, y: e.clientY, id: e.pointerId };
     el.setPointerCapture(e.pointerId);
@@ -300,7 +388,7 @@ const HINTS = {
   ports: "Tap the shape to add a connection point · tap a point to remove it",
 };
 function setMode(m) {
-  mode = m; armed = null;
+  mode = m; armed = null; draft = null;
   document.querySelectorAll("[data-mode]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.mode === m || (m === "ports" && b.dataset.mode === "select"))));
   graph.setEnabled(m === "select" || m === "box");
   rubber?.setEnabled(m === "box");
@@ -309,6 +397,70 @@ function setMode(m) {
   drawOverlay(); updateBar(); renderPop();
 }
 document.querySelectorAll("[data-mode]").forEach((b) => b.onclick = () => setMode(b.dataset.mode));
+
+/* ---------- draw tool: lines, polylines and arcs become stencil shapes ---------- */
+let drawTool = "line";  // "line" | "poly" | "arc"
+let draft = null;       // { pts: [{x,y}] in graph coords, cursor: {x,y} | null }
+const DRAW_TOOLS = [["line", "Line"], ["poly", "Polyline"], ["arc", "Arc"]];
+function drawHint() {
+  if (drawTool === "line") return draft ? "Tap the end point" : "Drag, or tap two points";
+  if (drawTool === "poly") return !draft ? "Tap to add points" : draft.pts.length < 3 ? "Tap to add points · Finish ends the line" : "Tap the first point to close · Finish ends the line";
+  return !draft ? "Tap the start point" : draft.pts.length === 1 ? "Tap the end point" : "Tap a point the arc passes through";
+}
+const snapPt = (p) => ({ x: snap(p.x), y: snap(p.y) });
+/* Circle through three points → SVG arc flags from a to b passing c; null if collinear. */
+function arcThrough(a, b, c) {
+  const d = 2 * (a.x * (b.y - c.y) + b.x * (c.y - a.y) + c.x * (a.y - b.y));
+  if (Math.abs(d) < 1e-6) return null;
+  const sq = (p) => p.x * p.x + p.y * p.y;
+  const cx = (sq(a) * (b.y - c.y) + sq(b) * (c.y - a.y) + sq(c) * (a.y - b.y)) / d;
+  const cy = (sq(a) * (c.x - b.x) + sq(b) * (a.x - c.x) + sq(c) * (b.x - a.x)) / d;
+  const r = Math.hypot(a.x - cx, a.y - cy), TAU = 2 * Math.PI;
+  const ang = (p) => Math.atan2(p.y - cy, p.x - cx), rel = (p) => ((ang(p) - ang(a)) % TAU + TAU) % TAU;
+  const sweep = rel(c) < rel(b), span = sweep ? rel(b) : TAU - rel(b);
+  return { r, sweep, large: span > Math.PI };
+}
+function commitDrawing(pts, { closed = false, arc = null } = {}) {
+  let segs;
+  if (arc) segs = [{ t: "M", p: [pts[0].x, pts[0].y] }, ...arcToCubics(pts[0].x, pts[0].y, arc.r, arc.r, 0, arc.large, arc.sweep, pts[1].x, pts[1].y).map((p) => ({ t: "C", p }))];
+  else segs = [{ t: "M", p: [pts[0].x, pts[0].y] }, ...pts.slice(1).map((p) => ({ t: "L", p: [p.x, p.y] })), ...(closed ? [{ t: "Z" }] : [])];
+  const st = stencilFromPaths([{ segs, paint: closed ? "fillstroke" : "stroke", cap: "round", join: "round" }], { minSize: 10 });
+  if (!st) return;
+  const style = { shape: addStencil(st.xml) };
+  if (!closed) {
+    style.fillColor = "none";
+    const ends = [pts[0], pts[pts.length - 1]];
+    style.ports = fmtPorts(ends.map((p) => [(p.x - st.x) / st.w, (p.y - st.y) / st.h]));
+  }
+  graph.insertVertex({ parent: graph.getDefaultParent(), value: "", x: st.x, y: st.y, width: st.w, height: st.h, style });
+}
+/* Called on pointer-up in draw mode with the snapped down/up points. */
+function drawStep(start, end, moved) {
+  const near = (p, q) => { const s = view.scale; return Math.hypot((p.x - q.x) * s, (p.y - q.y) * s) < 16; };
+  if (!draft) {
+    if (drawTool === "line" && moved && !near(start, end)) { commitDrawing([start, end]); return; }
+    draft = { pts: moved && !near(start, end) ? [start, end] : [end], cursor: null };
+    if (drawTool === "line" && draft.pts.length === 2) { commitDrawing(draft.pts); draft = null; }
+    return;
+  }
+  const pts = draft.pts;
+  if (drawTool === "line") { if (!near(pts[0], end)) commitDrawing([pts[0], end]); draft = null; return; }
+  if (drawTool === "poly") {
+    if (pts.length >= 3 && near(pts[0], end)) { commitDrawing(pts, { closed: true }); draft = null; return; }
+    if (pts.length >= 2 && near(pts[pts.length - 1], end)) { finishDraft(); return; }
+    if (!near(pts[pts.length - 1], end)) pts.push(end);
+    return;
+  }
+  // arc
+  if (pts.length === 1) { if (!near(pts[0], end)) pts.push(end); return; }
+  const arc = arcThrough(pts[0], pts[1], end);
+  commitDrawing(pts, arc ? { arc } : {});
+  draft = null;
+}
+function finishDraft() {
+  if (draft && drawTool === "poly" && draft.pts.length >= 2) commitDrawing(draft.pts);
+  draft = null; drawOverlay(); updateBar();
+}
 $("#tool-text").onclick = () => { setMode("select"); insertItem(LIB.basic.find((i) => i.n === "Text")); focusLabel(); };
 
 /* ---------- overlay: connection points ---------- */
@@ -321,7 +473,7 @@ function portPoints(cell) {
   return cs.map((c, i) => { const p = graph.getConnectionPoint(state, c); return p ? { x: p.x, y: p.y, c, i } : null; }).filter(Boolean);
 }
 function allVertices(parent = graph.getDefaultParent(), out = []) {
-  for (const c of parent.children || []) { if (c.isVertex()) { out.push(c); if (!(c.style?.ports)) allVertices(c, out); } }
+  for (const c of parent.children || []) { if (c.isVertex() && !isPort(c)) { out.push(c); if (!(c.style?.ports)) allVertices(c, out); } }
   return out;
 }
 let tempLine = null;
@@ -347,6 +499,23 @@ function drawOverlay() {
     }
   }
   if (tempLine) el("line", { class: "rubber", x1: tempLine.x1, y1: tempLine.y1, x2: tempLine.x2, y2: tempLine.y2 });
+  if (editing) {
+    const parts = graph.getChildCells(graph.getDefaultParent()).filter((c) => !isPort(c));
+    const b = parts.length && view.getBounds(parts);
+    if (b) el("rect", { class: "symframe", x: b.x - 6, y: b.y - 6, width: b.width + 12, height: b.height + 12, rx: 6 });
+  }
+  if (mode === "draw" && draft) {
+    const s = view.scale, t = view.translate, scr = (p) => ({ x: (p.x + t.x) * s, y: (p.y + t.y) * s });
+    const pts = draft.pts.map(scr), cur = draft.cursor && scr(draft.cursor);
+    if (drawTool === "arc" && pts.length === 2 && cur) {
+      const arc = arcThrough(draft.pts[0], draft.pts[1], draft.cursor);
+      el("path", { class: "rubber", d: arc ? `M${pts[0].x} ${pts[0].y}A${arc.r * s} ${arc.r * s} 0 ${+arc.large} ${+arc.sweep} ${pts[1].x} ${pts[1].y}` : `M${pts[0].x} ${pts[0].y}L${pts[1].x} ${pts[1].y}` });
+    } else {
+      const line = cur ? [...pts, cur] : pts;
+      if (line.length > 1) el("polyline", { class: "rubber", points: line.map((p) => `${p.x},${p.y}`).join(" ") });
+    }
+    pts.forEach((p, i) => el("circle", { class: "port" + (i === 0 && drawTool === "poly" && pts.length >= 3 ? " armed" : ""), cx: p.x, cy: p.y, r: 5 }));
+  }
 }
 function hitPort(pt, radius = 26) {
   let best = null, bd = radius;
@@ -414,7 +583,7 @@ window.addEventListener("pointerdown", (e) => {
   const pt = local(e);
   pointers.set(e.pointerId, { ...pt, type: e.pointerType });
   if (pointers.size === 2) {
-    clearTimeout(lpTimer); lpTimer = null; tempLine = null; drawOverlay();
+    clearTimeout(lpTimer); lpTimer = null; tempLine = null; if (draft?.preview) draft = null; drawOverlay();
     resetMg();
     const [a, b] = [...pointers.values()];
     gesture = { kind: "pinch", d0: Math.hypot(a.x - b.x, a.y - b.y) || 1, s0: view.scale,
@@ -436,6 +605,7 @@ window.addEventListener("pointerdown", (e) => {
     gesture = { kind: "pan", last: pt, start: pt }; stop(e); return;
   }
   if (mode === "ports") { gesture = { kind: "tap", start: pt, pan: true, last: pt }; stop(e); return; }
+  if (mode === "draw") { gesture = { kind: "draw", start: pt, moved: false }; stop(e); e.preventDefault(); return; }
 
   const bg = isBackground(e, pt);
   if (mode === "select" && bg && e.pointerType !== "pen") { gesture = { kind: "pan", last: pt, start: pt }; stop(e); return; }
@@ -444,7 +614,11 @@ window.addEventListener("pointerdown", (e) => {
 }, true);
 
 window.addEventListener("pointermove", (e) => {
-  if (!pointers.has(e.pointerId)) return;
+  if (!pointers.has(e.pointerId)) {
+    // Mouse/pen hover: preview the next segment of a drawing
+    if (mode === "draw" && draft && inCanvas(e)) { draft.cursor = snapPt(toGraph(local(e))); drawOverlay(); }
+    return;
+  }
   const pt = local(e);
   const rec = pointers.get(e.pointerId); rec.x = pt.x; rec.y = pt.y;
   if (lpTimer && Math.hypot(pt.x - lpStart.x, pt.y - lpStart.y) > 10) { clearTimeout(lpTimer); lpTimer = null; }
@@ -471,6 +645,13 @@ window.addEventListener("pointermove", (e) => {
     if (gesture.moved) { const over = hitPort(pt); tempLine = { x1: gesture.src.x, y1: gesture.src.y, x2: over ? over.x : pt.x, y2: over ? over.y : pt.y }; drawOverlay(); }
     stop(e); return;
   }
+  if (gesture.kind === "draw") {
+    if (Math.hypot(pt.x - gesture.start.x, pt.y - gesture.start.y) > 8) gesture.moved = true;
+    const cur = snapPt(toGraph(pt));
+    if (draft) draft.cursor = cur;
+    else if (gesture.moved) { draft = { pts: [snapPt(toGraph(gesture.start))], cursor: cur, preview: true }; }
+    drawOverlay(); stop(e); return;
+  }
   if (gesture.kind === "lock" || gesture.kind === "tap") { stop(e); }
 }, true);
 
@@ -485,7 +666,16 @@ function endPointer(e) {
   if (g.kind === "lock") { stop(e); if (pointers.size === 0) gesture = null; return; }
   if (g.kind === "penbox") { gesture = null; setTimeout(() => rubber?.setEnabled(mode === "box"), 0); return; }
   gesture = null;
-  if (e.type === "pointercancel") { tempLine = null; drawOverlay(); stop(e); return; }
+  if (e.type === "pointercancel") { tempLine = null; if (draft?.preview) draft = null; drawOverlay(); stop(e); return; }
+
+  if (g.kind === "draw") {
+    stop(e);
+    const start = snapPt(toGraph(g.start)), end = snapPt(toGraph(pt));
+    if (draft?.preview) draft = null; // a drag that began with no drawing in progress
+    drawStep(start, end, g.moved);
+    if (draft) draft.cursor = e.pointerType === "mouse" ? end : null;
+    drawOverlay(); updateBar(); return;
+  }
 
   if (g.kind === "pan") {
     stop(e);
@@ -514,6 +704,14 @@ function endPointer(e) {
 window.addEventListener("pointerup", endPointer, true);
 window.addEventListener("pointercancel", endPointer, true);
 function flashEdge(edge) { if (edge) toast("Connected"); }
+
+/* Right-click opens the context menu for mouse users; touch long-press is handled above,
+   so the browser's own long-press contextmenu event is swallowed. */
+container.addEventListener("contextmenu", (e) => {
+  e.preventDefault();
+  if (e.pointerType && e.pointerType !== "mouse") return;
+  if (mode === "select" || mode === "box") contextMenu(e.clientX, e.clientY, local(e));
+});
 
 /* Mouse wheel / trackpad zoom for desktop */
 container.addEventListener("wheel", (e) => {
@@ -565,6 +763,8 @@ const ic = {
   dup: `<svg viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></svg>`,
   rot: `<svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg>`,
   front: `<svg viewBox="0 0 24 24"><path d="m12 3 9 5-9 5-9-5z"/><path d="m3 12.5 9 5 9-5" opacity=".45"/><path d="m3 16.5 9 5 9-5" opacity=".45"/></svg>`,
+  plus: `<svg viewBox="0 0 38 28" aria-hidden="true"><path class="np" d="M19 6v16M11 14h16"/></svg>`,
+  importSvg: `<svg viewBox="0 0 38 28" aria-hidden="true"><path class="np" d="M19 3v14M13 11l6 6 6-6M9 19v5h20v-5"/></svg>`,
 };
 const bar = $("#bar");
 let labelT;
@@ -590,8 +790,26 @@ function updateBar() {
     $("#cdone").onclick = () => setMode("select");
     return;
   }
+  if (mode === "draw") {
+    bar.hidden = false;
+    bar.innerHTML = DRAW_TOOLS.map(([k, n]) => `<button class="chip" type="button" data-tool="${k}" aria-pressed="${k === drawTool}">${n}</button>`).join("") +
+      `<span class="hint">${drawHint()}</span>` +
+      (drawTool === "poly" && draft?.pts.length >= 2 ? `<button class="txtbtn quiet" id="dfinish" type="button">Finish</button>` : "") +
+      `<button class="txtbtn" id="ddone" type="button">Done</button>`;
+    bar.querySelectorAll("[data-tool]").forEach((b) => b.onclick = () => { drawTool = b.dataset.tool; draft = null; drawOverlay(); updateBar(); });
+    $("#dfinish") && ($("#dfinish").onclick = finishDraft);
+    $("#ddone").onclick = () => { finishDraft(); setMode("select"); };
+    return;
+  }
   if (!cells.length) { bar.hidden = true; return; }
   bar.hidden = false;
+  if (cells.every(isPort)) {
+    bar.innerHTML = `<span class="hint">${cells.length === 1 ? "Connection point · drag to move it" : `${cells.length} connection points`}</span>
+      <button class="ib" type="button" id="b-dup" title="Duplicate" aria-label="Duplicate">${ic.dup}</button>
+      <button class="ib danger" type="button" id="b-del" title="Delete" aria-label="Delete">${ic.trash}</button>`;
+    $("#b-dup").onclick = duplicate; $("#b-del").onclick = removeSelection;
+    return;
+  }
   const one = cells.length === 1 ? cells[0] : null;
   const parts = [];
   if (one) parts.push(`<input type="text" id="label" placeholder="Label" aria-label="Label" value="${labelText(one).replace(/\n/g, " / ").replace(/"/g, "&quot;")}">`);
@@ -660,16 +878,180 @@ function makeSymbol() {
   graph.setSelectionCell(group);
   portsCell = group; setMode("ports");
 }
-function saveSymbol(cell, name) {
+function itemFromCell(cell, name) {
   const g = cell.geometry;
   const kids = (cell.children || []).filter((c) => c.isVertex());
-  const ports = fmtPorts(relPortsOf(cell));
-  const item = { n: name, w: g.width, h: g.height, ports };
+  const item = { n: name, w: g.width, h: g.height, ports: fmtPorts(relPortsOf(cell)) };
   if (kids.length) item.parts = kids.map((k) => ({ v: labelText(k), s: { ...k.style }, x: k.geometry.x, y: k.geometry.y, w: k.geometry.width, h: k.geometry.height }));
   else { const s = { ...cell.style }; delete s.ports; item.parts = [{ v: labelText(cell), s, x: 0, y: 0, w: g.width, h: g.height }]; }
+  return item;
+}
+function addToMine(item) {
+  item.thumb = itemThumb(item) || "";
   const list = loadMine(); list.push(item); saveMine(list);
-  toast(`Saved “${name}” to Mine`);
   if (cat === "mine") renderTiles();
+}
+function saveSymbol(cell, name) {
+  addToMine(itemFromCell(cell, name));
+  toast(`Saved “${name}” to Mine`);
+}
+
+/* ---------- symbol editor ----------
+   Swaps the model's root for a scratch root, so every canvas tool works on the
+   symbol. The diagram's root (same cell objects) and undo history come back on exit. */
+const PORT_SIZE = 10;
+function addPortMarker(x, y, exact = false) {
+  const at = (n) => (exact ? n : snap(n)) - PORT_SIZE / 2; // existing ports load exactly; new ones snap their centre
+  return graph.insertVertex({ parent: graph.getDefaultParent(), value: "", x: at(x), y: at(y), width: PORT_SIZE, height: PORT_SIZE,
+    style: { lwPort: true, shape: "ellipse", perimeter: "ellipsePerimeter", fillColor: css("--paper"), strokeColor: css("--accent"), strokeWidth: 2.5, resizable: false, rotatable: false } });
+}
+function openEditor(item, target) {
+  if (editing) return;
+  closeMenus(); togglePop(false); setMode("select"); graph.clearSelection();
+  flushSave();
+  // copy the history: the root swap below is itself recorded as an undoable edit
+  editing = { target, root: model.getRoot(), history: undo.history.slice(), index: undo.indexOfNextAdd,
+    scale: view.scale, tx: view.translate.x, ty: view.translate.y, name: item?.n || "New symbol" };
+  model.setRoot(model.createRoot());
+  graph.setGridSize(5);
+  if (item) graph.batchUpdate(() => {
+    const P = graph.getDefaultParent();
+    const parts = item.parts || [{ v: item.v, s: item.s, x: 0, y: 0, w: item.w, h: item.h }];
+    for (const p of parts) graph.insertVertex({ parent: P, value: p.v, x: p.x, y: p.y, width: p.w, height: p.h, style: { ...p.s } });
+    for (const [x, y] of parsePorts(item.ports || "")) addPortMarker(x * item.w, y * item.h, true);
+  });
+  undo.clear(); syncUndo();
+  document.body.classList.add("editing");
+  renderEditHead();
+  if (item) fitView(); else view.scaleAndTranslate(1.5, container.clientWidth / 3 - 60, container.clientHeight / 3 - 40);
+  updateGrid(); drawOverlay();
+  toast(item ? "Editing symbol · round markers are its connection points" : "New symbol · draw with the pen, or add shapes from the library", 3400);
+  if (!item) setMode("draw");
+}
+/** Flatten the editor canvas into a library item. */
+function editorItem(name) {
+  const parts = [], ports = [];
+  let edges = 0;
+  const walk = (cells, ox, oy) => {
+    for (const c of cells) {
+      if (c.isEdge()) { edges++; continue; }
+      if (!c.isVertex() || !c.geometry) continue;
+      const g = c.geometry;
+      if (isPort(c)) { ports.push([ox + g.x + g.width / 2, oy + g.y + g.height / 2]); continue; }
+      const st = { ...c.style }; delete st.ports;
+      const holder = c.getChildCount() > 0 && st.fillColor === "none" && st.strokeColor === "none" && !labelText(c);
+      if (!holder) parts.push({ v: labelText(c), s: st, x: ox + g.x, y: oy + g.y, w: g.width, h: g.height });
+      walk(c.children || [], ox + g.x, oy + g.y);
+    }
+  };
+  walk(graph.getDefaultParent().children || [], 0, 0);
+  if (!parts.length) return null;
+  const bx = Math.min(...parts.map((p) => p.x)), by = Math.min(...parts.map((p) => p.y));
+  const bw = Math.max(...parts.map((p) => p.x + p.w)) - bx, bh = Math.max(...parts.map((p) => p.y + p.h)) - by;
+  for (const p of parts) { p.x -= bx; p.y -= by; }
+  const r = (n) => Math.round(n * 1000) / 1000;
+  // dx/dy: where the new bounds start relative to the symbol's original origin
+  return { item: { n: name, w: bw, h: bh, ports: fmtPorts(ports.map(([x, y]) => [r((x - bx) / bw), r((y - by) / bh)])), parts }, edges, dx: bx, dy: by };
+}
+function closeEditor() {
+  const e = editing; if (!e) return;
+  graph.clearSelection(); togglePop(false); setMode("select");
+  model.setRoot(e.root);
+  undo.history = e.history; undo.indexOfNextAdd = e.index; syncUndo();
+  graph.setGridSize(10);
+  editing = null;
+  document.body.classList.remove("editing");
+  renderEditHead();
+  view.scaleAndTranslate(e.scale, e.tx, e.ty);
+  updateGrid(); drawOverlay();
+}
+function saveEditor() {
+  if (!editing) return;
+  const name = $("#edname").value.trim() || "My symbol";
+  const res = editorItem(name);
+  if (!res) { toast("Add a shape or a drawing to the symbol first"); return; }
+  const { item, edges } = res, t = editing.target;
+  item.thumb = itemThumb(item) || "";
+  closeEditor();
+  if (t.kind === "cell") applyItemToCell(t.cell, item, res.dx, res.dy);
+  else {
+    const list = loadMine();
+    if (t.kind === "mine" && list[t.idx]) list[t.idx] = item; else list.push(item);
+    saveMine(list);
+    if (cat === "mine") renderTiles();
+  }
+  toast((t.kind === "cell" ? "Symbol updated" : `Saved “${name}” to Mine`) + (edges ? " · connectors were left out" : ""), 3000);
+}
+function cancelEditor() {
+  if (undo.canUndo()) confirmSheet("Discard changes to this symbol?", "Your edits to the symbol are lost. The diagram is unchanged.", "Discard", closeEditor);
+  else closeEditor();
+}
+function applyItemToCell(cell, item, dx = 0, dy = 0) {
+  if (!cell || !model.contains(cell)) return;
+  graph.batchUpdate(() => {
+    for (const ch of [...(cell.children || [])]) model.remove(ch);
+    const g = cell.geometry.clone(); g.x += dx; g.y += dy; g.width = item.w; g.height = item.h; model.setGeometry(cell, g);
+    if (item.parts.length > 1) {
+      model.setValue(cell, "");
+      model.setStyle(cell, { fillColor: "none", strokeColor: "none", ports: item.ports });
+      for (const p of item.parts) graph.insertVertex({ parent: cell, value: p.v, x: p.x, y: p.y, width: p.w, height: p.h, style: { ...p.s } });
+    } else {
+      const p = item.parts[0];
+      model.setValue(cell, p.v);
+      model.setStyle(cell, { ...p.s, ports: item.ports });
+    }
+  });
+  graph.setSelectionCell(cell);
+}
+function renderEditHead() {
+  $("#edhead").hidden = !editing;
+  $(".brand").hidden = !!editing;
+  if (editing) {
+    $("#edname").value = editing.name;
+    $("#edsave").textContent = editing.target.kind === "cell" ? "Apply" : "Save";
+  }
+}
+$("#edsave").onclick = saveEditor;
+$("#edcancel").onclick = cancelEditor;
+$("#edname").addEventListener("keydown", (e) => { e.stopPropagation(); if (e.key === "Enter") e.currentTarget.blur(); });
+
+/* ---------- SVG import ---------- */
+function pickFiles(accept, multiple = false) {
+  return new Promise((res) => {
+    const input = document.createElement("input");
+    input.type = "file"; input.accept = accept; input.multiple = multiple;
+    input.onchange = () => res([...(input.files || [])]);
+    input.click();
+  });
+}
+/** Turn an svgToSymbol() result into a library item at a sensible size. */
+function importedItem(res, name) {
+  const long = Math.max(res.w, res.h), k = long < 40 || long > 200 ? 80 / long : 1;
+  const w = Math.max(4, Math.round(res.w * k)), h = Math.max(4, Math.round(res.h * k));
+  const label = { verticalLabelPosition: "bottom", verticalAlign: "top" };
+  const s = res.kind === "stencil" ? { shape: addStencil(res.xml), ...label } : { shape: "image", image: res.uri, fillColor: "none", strokeColor: "none", ...label };
+  return { n: name, w, h, ports: fmtPorts(SIDES), parts: [{ v: "", s, x: 0, y: 0, w, h }] };
+}
+async function importSvgText(text, name) {
+  const res = await svgToSymbol(text);
+  const item = importedItem(res, name);
+  if (!editing) addToMine(item);
+  insertItem(item);
+  return res;
+}
+async function importSvgFiles() {
+  const files = await pickFiles(".svg,image/svg+xml", true);
+  let ok = 0, last = null;
+  for (const f of files) {
+    const name = f.name.replace(/\.svg$/i, "").slice(0, 40) || "Imported";
+    try { last = { res: await importSvgText(await f.text(), name), name }; ok++; }
+    catch (err) { toast(`${f.name}: ${err.message || "could not be imported"}`, 3600); console.warn(err); }
+  }
+  if (!ok) return;
+  const where = editing ? "into the symbol" : "and saved to Mine";
+  if (ok > 1) toast(`Imported ${ok} SVGs ${where}`, 3000);
+  else if (last.res.kind === "image") toast(`Imported “${last.name}” as a picture because ${last.res.reason}`, 4200);
+  else toast(`Imported “${last.name}” ${where}`, 3000);
 }
 
 /* ---------- clipboard ---------- */
@@ -836,14 +1218,20 @@ function contextMenu(cx, cy, pt) {
     const sel = graph.getSelectionCells();
     const items = [{ t: "Edit label", f: focusLabel }, { t: "Copy", f: copySelection }, { t: "Cut", f: cutSelection }, { t: "Duplicate", f: duplicate }];
     if (arrangeable().length > 1) items.push({ t: "Arrange…", f: () => setTimeout(() => arrangeMenu(cx, cy), 0) });
-    if (sel.length === 1 && cell.isVertex()) items.push({ t: "Connection points", f: () => { portsCell = cell; setMode("ports"); } }, { t: "Save to library", f: () => saveSymbol(cell, labelText(cell).split("\n")[0] || "My symbol") });
-    if (sel.length > 1) items.push({ t: "Make symbol from selection", f: makeSymbol });
+    if (sel.length === 1 && cell.isVertex() && !editing) {
+      const name = labelText(cell).split("\n")[0] || "My symbol";
+      items.push({ t: "Connection points", f: () => { portsCell = cell; setMode("ports"); } },
+        { t: "Edit as symbol…", f: () => openEditor(itemFromCell(cell, name), { kind: "cell", cell }) },
+        { t: "Save to library", f: () => saveSymbol(cell, name) });
+    }
+    if (sel.length > 1 && !editing) items.push({ t: "Make symbol from selection", f: makeSymbol });
     items.push({ t: "Bring to front", f: () => graph.orderCells(false, sel) }, { t: "Send to back", f: () => graph.orderCells(true, sel) }, "-", { t: "Delete", danger: true, f: removeSelection });
     menu(cx, cy, items);
   } else {
     const at = toGraph(pt);
     menu(cx, cy, [
       ...(canPaste() ? [{ t: "Paste here", f: () => pasteAt(at) }] : []),
+      ...(editing ? [{ t: "Add connection point here", f: () => graph.setSelectionCell(addPortMarker(at.x, at.y)) }] : []),
       { t: "Add text here", f: () => { insertItem(LIB.basic.find((i) => i.n === "Text"), at); focusLabel(); } },
       { t: "Add box here", f: () => insertItem(LIB.basic[1], at) },
       { t: "Select all", f: selectAll },
@@ -852,11 +1240,27 @@ function contextMenu(cx, cy, pt) {
   }
 }
 function mineMenu(e, idx) {
-  const list = loadMine();
+  const list = loadMine(), item = list[idx];
+  if (!item) return;
   menu(e.clientX, e.clientY, [
-    { t: "Place in view", f: () => insertItem(list[idx]) },
-    { t: `Delete “${list[idx].n}”`, danger: true, f: () => { list.splice(idx, 1); saveMine(list); renderTiles(); } },
+    { t: "Place in view", f: () => insertItem(item) },
+    ...(editing ? [] : [
+      { t: "Edit symbol…", f: () => openEditor(item, { kind: "mine", idx }) },
+      { t: "Rename…", f: () => promptSheet("Rename symbol", item.n, "Rename", (n) => { item.n = n; saveMine(list); renderTiles(); }) },
+      "-",
+      { t: `Delete “${item.n}”`, danger: true, f: () => { list.splice(idx, 1); saveMine(list); renderTiles(); } },
+    ]),
   ]);
+}
+function promptSheet(title, value, ok, f) {
+  sheet(`<h2>${title}</h2><input type="text" class="field" maxlength="60" aria-label="${title}"><div class="row"><button class="txtbtn quiet" data-x>Cancel</button><button class="txtbtn" data-ok>${ok}</button></div>`,
+    (s, close) => {
+      const i = s.querySelector("input"); i.value = value;
+      const done = () => { const v = i.value.trim(); if (v) { close(); f(v); } else i.focus(); };
+      s.querySelector("[data-x]").onclick = close; s.querySelector("[data-ok]").onclick = done;
+      i.addEventListener("keydown", (e) => { e.stopPropagation(); if (e.key === "Enter") done(); if (e.key === "Escape") close(); });
+      i.focus(); i.select();
+    });
 }
 function sheet(html, wire) {
   closeMenus();
@@ -867,13 +1271,25 @@ function sheet(html, wire) {
 }
 $("#more").onclick = (e) => {
   const r = e.currentTarget.getBoundingClientRect();
+  const snapItem = { t: snapOn ? "Snap to grid: on" : "Snap to grid: off", f: () => setSnap(!snapOn) };
+  if (editing) {
+    menu(r.right - 220, r.bottom + 6, [
+      { t: "Import SVG into symbol…", f: importSvgFiles },
+      { t: "Add connection point", f: () => { const c = viewCenter(); graph.setSelectionCell(addPortMarker(c.x, c.y)); } },
+      snapItem, "-",
+      { t: "Discard changes", danger: true, f: cancelEditor },
+    ]);
+    return;
+  }
   menu(r.right - 220, r.bottom + 6, [
     { t: "Open file…", f: openFile },
+    { t: "Import SVG as symbol…", f: importSvgFiles },
+    { t: "New symbol…", f: () => openEditor(null, { kind: "new" }) },
     { t: "Save as .linework file", f: saveFile },
     { t: "Export SVG", f: () => exportImage("svg") },
     { t: "Export PNG", f: () => exportImage("png") },
     "-",
-    { t: snapOn ? "Snap to grid: on" : "Snap to grid: off", f: () => setSnap(!snapOn) },
+    snapItem,
     { t: "Diagram XML…", f: xmlSheet },
     { t: "Load example diagram", f: () => confirmSheet("Load the example diagram?", "This replaces what is on the canvas, and undo history starts over.", "Load example", () => { replaceModel(EXAMPLE); }) },
     "-",
@@ -885,7 +1301,7 @@ function confirmSheet(title, body, ok, f) {
     (s, close) => { s.querySelector("[data-x]").onclick = close; s.querySelector("[data-ok]").onclick = () => { close(); f(); }; s.querySelector("[data-ok]").focus(); });
 }
 function xmlSheet() {
-  const xml = new ModelXmlSerializer(model).export();
+  const xml = exportXml();
   sheet(`<h2>Diagram XML</h2><p>Copy this to keep a backup or move the diagram to another device. Paste XML here and choose Load to replace the canvas.</p>
     <textarea id="xmlbox" spellcheck="false" aria-label="Diagram XML"></textarea>
     <div class="row"><button class="txtbtn quiet" data-x>Close</button><button class="txtbtn quiet" data-copy>Copy</button><button class="txtbtn" data-load>Load</button></div>`,
@@ -905,7 +1321,7 @@ function download(blob, name) {
 }
 function stamp() { const d = new Date(), z = (n) => String(n).padStart(2, "0"); return `${d.getFullYear()}${z(d.getMonth() + 1)}${z(d.getDate())}-${z(d.getHours())}${z(d.getMinutes())}`; }
 function saveFile() {
-  download(new Blob([new ModelXmlSerializer(model).export()], { type: "application/xml" }), `diagram-${stamp()}.linework`);
+  download(new Blob([exportXml()], { type: "application/xml" }), `diagram-${stamp()}.linework`);
 }
 function openFile() {
   const input = document.createElement("input");
@@ -956,7 +1372,7 @@ function exportImage(kind) {
 }
 function replaceModel(xml) {
   const tmpModel = graph.getDataModel ? graph.getDataModel() : graph.model;
-  new ModelXmlSerializer(tmpModel).import(xml);
+  new ModelXmlSerializer(tmpModel).import(takeStencils(xml));
   undo.clear(); syncUndo(); graph.clearSelection(); fitView(); scheduleSave();
 }
 
@@ -977,8 +1393,11 @@ document.addEventListener("keydown", (e) => {
     nudge(e.key === "ArrowLeft" ? -d : e.key === "ArrowRight" ? d : 0, e.key === "ArrowUp" ? -d : e.key === "ArrowDown" ? d : 0);
   }
   else if (e.key === "Delete" || e.key === "Backspace") { removeSelection(); }
+  else if (e.key === "Escape" && mode === "draw" && draft) { draft = null; drawOverlay(); updateBar(); }
+  else if (e.key === "Enter" && mode === "draw") { finishDraft(); }
   else if (e.key === "Escape") { closeMenus(); togglePop(false); setMode("select"); graph.clearSelection(); }
-  else if (e.key === "c" && !mod) setMode(mode === "connect" ? "select" : "connect");
+  else if (e.key === "c" && !mod && !editing) setMode(mode === "connect" ? "select" : "connect");
+  else if (e.key === "p" && !mod) setMode(mode === "draw" ? "select" : "draw");
 });
 
 /* ---------- example diagram ---------- */
@@ -1027,10 +1446,20 @@ setDrawer(innerWidth > 1000);
 }
 const saved = store.get(DOC_KEY);
 let loaded = false;
-if (saved) { try { new ModelXmlSerializer(model).import(saved); loaded = graph.getChildCells(graph.getDefaultParent()).length > 0; if (loaded) $("#status").textContent = "Restored from this device"; } catch (err) { console.warn(err); } }
+if (saved) { try { new ModelXmlSerializer(model).import(takeStencils(saved)); loaded = graph.getChildCells(graph.getDefaultParent()).length > 0; if (loaded) $("#status").textContent = "Restored from this device"; } catch (err) { console.warn(err); } }
 if (!loaded) new ModelXmlSerializer(model).import(EXAMPLE);
 undo.clear(); syncUndo();
+// Forget stored stencils that neither the open diagram nor the Mine library uses.
+// (Diagram files carry their own copies, so nothing elsewhere depends on these.)
+{
+  const used = new Set(Object.values(model.cells || {}).map((c) => c.style?.shape));
+  for (const it of loadMine()) for (const p of it.parts || []) used.add(p.s?.shape);
+  let pruned = false;
+  for (const n of [...custom.keys()]) if (!used.has(n)) { custom.delete(n); pruned = true; }
+  if (pruned) saveStencils();
+}
 updateGrid();
 requestAnimationFrame(fitView);
 setMode("select");
-window.__lw = { buildSvg, graph, model, view, setMode, insertItem, LIB, connect, hitPort, portPoints, relPortsOf };
+window.__lw = { buildSvg, graph, model, view, setMode, insertItem, LIB, connect, hitPort, portPoints, relPortsOf,
+  openEditor, closeEditor, saveEditor, importSvgText, exportXml, loadMine, commitDrawing, get editing() { return editing; } };

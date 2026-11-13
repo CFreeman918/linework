@@ -14,6 +14,12 @@
 <div class="app">
   <header>
     <div class="brand"><b>Linework</b><span id="status">Example diagram · saved on this device</span></div>
+    <div class="edhead" id="edhead" hidden>
+      <span class="edtag">Symbol</span>
+      <input type="text" id="edname" maxlength="60" placeholder="Symbol name" aria-label="Symbol name">
+      <button class="ib" id="edcancel" type="button" title="Discard changes" aria-label="Discard changes"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+      <button class="txtbtn" id="edsave" type="button">Save</button>
+    </div>
     <div class="hgroup">
       <button class="ib" id="undo" title="Undo" aria-label="Undo"><svg viewBox="0 0 24 24"><path d="M9 14 4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/></svg></button>
       <button class="ib" id="redo" title="Redo" aria-label="Redo"><svg viewBox="0 0 24 24"><path d="m15 14 5-5-5-5"/><path d="M20 9H10a6 6 0 0 0 0 12h3"/></svg></button>
@@ -31,6 +37,7 @@
       <button class="ib" data-mode="select" title="Select and move" aria-label="Select and move" aria-pressed="true"><svg viewBox="0 0 24 24"><path d="M5 3.5 18.5 10l-6 1.8-2.6 5.8z"/></svg></button>
       <button class="ib" data-mode="box" title="Box select" aria-label="Box select" aria-pressed="false"><svg viewBox="0 0 24 24"><path d="M4 8V4h4M16 4h4v4M20 16v4h-4M8 20H4v-4"/><rect x="9" y="9" width="6" height="6" rx="1"/></svg></button>
       <button class="ib" data-mode="connect" title="Connect" aria-label="Connect" aria-pressed="false"><svg viewBox="0 0 24 24"><circle cx="5.5" cy="6" r="2.5"/><circle cx="18.5" cy="18" r="2.5"/><path d="M8 6h5a2 2 0 0 1 2 2v8a2 2 0 0 0 2 2h-1"/></svg></button>
+      <button class="ib" data-mode="draw" title="Draw lines and arcs" aria-label="Draw lines and arcs" aria-pressed="false"><svg viewBox="0 0 24 24"><path d="M4 20l1.2-4.6L16 4.6a2 2 0 0 1 2.8 0l.6.6a2 2 0 0 1 0 2.8L8.6 18.8z"/><path d="M14 7l3 3"/></svg></button>
       <button class="ib" id="tool-text" title="Add text" aria-label="Add text"><svg viewBox="0 0 24 24"><path d="M5 6V4.5h14V6M12 4.5v15M9 19.5h6"/></svg></button>
     </nav>
 
