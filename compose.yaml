@@ -1,0 +1,17 @@
+# Dev server in a container: `podman compose up` (or `docker compose up`),
+# then open http://<this-computer's-IP>:5173 on the tablet.
+services:
+  dev:
+    image: docker.io/library/node:22-bookworm
+    working_dir: /app
+    command: sh -c "npm ci && npm run dev -- --port 5173"
+    ports:
+      - "5173:5173"
+    volumes:
+      - .:/app
+      - node_modules:/app/node_modules
+    environment:
+      # Reliable hot reload through Windows/WSL bind mounts
+      - CHOKIDAR_USEPOLLING=true
+volumes:
+  node_modules:

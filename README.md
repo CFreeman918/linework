@@ -35,6 +35,16 @@ npm run build    # production build in dist/
 npm run preview  # serve the production build
 ```
 
+### In a container
+
+With Podman or Docker installed, run this from the repo folder:
+
+```bash
+podman compose up    # or: docker compose up
+```
+
+Then open `http://<your-computer's-IP>:5173` on the tablet. Stop it with Ctrl+C.
+
 Pushing to `main` builds the app and deploys it to GitHub Pages (`.github/workflows/deploy.yml`).
 
 ## File format
