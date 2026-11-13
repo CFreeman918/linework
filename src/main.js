@@ -149,7 +149,21 @@ const selH = graph.getPlugin("SelectionHandler");
 const rubber = graph.getPlugin("RubberBandHandler");
 const panH = graph.getPlugin("PanningHandler");
 const connH = graph.getPlugin("ConnectionHandler");
-if (selH) selH.guidesEnabled = true;
+if (selH) {
+  selH.guidesEnabled = true;
+  // Move the real shapes while dragging (maxGraph's default is a thin dashed outline),
+  // drawn slightly transparent so what's underneath stays visible.
+  selH.maxLivePreview = 150;
+  const update0 = selH.updateLivePreview, reset0 = selH.resetLivePreview;
+  selH.updateLivePreview = function (dx, dy) {
+    update0.call(this, dx, dy);
+    this.allCells?.forEach((s) => { for (const n of [s?.shape?.node, s?.text?.node]) n?.classList.add("lw-drag"); });
+  };
+  selH.resetLivePreview = function () {
+    container.querySelectorAll(".lw-drag").forEach((n) => n.classList.remove("lw-drag"));
+    return reset0.call(this);
+  };
+}
 if (panH) panH.panningEnabled = false;
 rubber?.setEnabled(false);
 
@@ -201,6 +215,7 @@ function applyTheme() {
   VertexHandlerConfig.selectionColor = EdgeHandlerConfig.selectionColor = EdgeHandlerConfig.connectFillColor = css("--accent");
   HandleConfig.fillColor = css("--paper"); HandleConfig.strokeColor = css("--accent");
   HandleConfig.labelFillColor = css("--accent");
+  if (selH) selH.previewColor = css("--accent"); // outline used for very large selections
   graph.refresh();
   drawOverlay();
 }
