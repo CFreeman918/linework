@@ -176,7 +176,8 @@ new MutationObserver(applyTheme).observe(document.documentElement, { attributes:
 
 /* Undo */
 const undo = new UndoManager();
-const onUndoable = (_s, evt) => undo.undoableEditHappened(evt.getProperty("edit"));
+// UNDO fires after CHANGE, so the buttons must re-sync here too
+const onUndoable = (_s, evt) => { undo.undoableEditHappened(evt.getProperty("edit")); syncUndo(); };
 model.addListener(InternalEvent.UNDO, onUndoable);
 view.addListener(InternalEvent.UNDO, onUndoable);
 function syncUndo() { $("#undo").disabled = !undo.canUndo(); $("#redo").disabled = !undo.canRedo(); }
