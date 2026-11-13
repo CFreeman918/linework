@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+  <meta name="theme-color" content="#F8F9F6" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#1B2022" media="(prefers-color-scheme: dark)">
+  <meta name="description" content="Touch-first diagram editor for flowcharts, P&amp;IDs and schematics.">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icon-192.png">
+  <title>Linework</title>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="brand"><b>Linework</b><span id="status">Example diagram · saved on this device</span></div>
+    <div class="hgroup">
+      <button class="ib" id="undo" title="Undo" aria-label="Undo"><svg viewBox="0 0 24 24"><path d="M9 14 4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/></svg></button>
+      <button class="ib" id="redo" title="Redo" aria-label="Redo"><svg viewBox="0 0 24 24"><path d="m15 14 5-5-5-5"/><path d="M20 9H10a6 6 0 0 0 0 12h3"/></svg></button>
+      <button class="ib" id="more" title="Diagram menu" aria-label="Diagram menu"><svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="19" cy="12" r="1.2"/></svg></button>
+    </div>
+  </header>
+
+  <div class="stage" id="stage">
+    <div id="graph"></div>
+    <svg id="overlay"></svg>
+
+    <nav class="rail left" aria-label="Tools">
+      <button class="ib" id="tool-shapes" title="Shapes" aria-label="Shapes" aria-pressed="false"><svg viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="7" height="7" rx="1.5"/><circle cx="17" cy="7" r="3.5"/><path d="m7 13.5 3.8 7H3.2z"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.5"/></svg></button>
+      <hr>
+      <button class="ib" data-mode="select" title="Select and move" aria-label="Select and move" aria-pressed="true"><svg viewBox="0 0 24 24"><path d="M5 3.5 18.5 10l-6 1.8-2.6 5.8z"/></svg></button>
+      <button class="ib" data-mode="box" title="Box select" aria-label="Box select" aria-pressed="false"><svg viewBox="0 0 24 24"><path d="M4 8V4h4M16 4h4v4M20 16v4h-4M8 20H4v-4"/><rect x="9" y="9" width="6" height="6" rx="1"/></svg></button>
+      <button class="ib" data-mode="connect" title="Connect" aria-label="Connect" aria-pressed="false"><svg viewBox="0 0 24 24"><circle cx="5.5" cy="6" r="2.5"/><circle cx="18.5" cy="18" r="2.5"/><path d="M8 6h5a2 2 0 0 1 2 2v8a2 2 0 0 0 2 2h-1"/></svg></button>
+      <button class="ib" id="tool-text" title="Add text" aria-label="Add text"><svg viewBox="0 0 24 24"><path d="M5 6V4.5h14V6M12 4.5v15M9 19.5h6"/></svg></button>
+    </nav>
+
+    <nav class="rail right" aria-label="View">
+      <button class="ib" id="zin" title="Zoom in" aria-label="Zoom in"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
+      <button class="zoomval" id="zval" title="Reset to 100%">100%</button>
+      <button class="ib" id="zout" title="Zoom out" aria-label="Zoom out"><svg viewBox="0 0 24 24"><path d="M5 12h14"/></svg></button>
+      <hr>
+      <button class="ib" id="fit" title="Fit diagram" aria-label="Fit diagram"><svg viewBox="0 0 24 24"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></svg></button>
+    </nav>
+
+    <aside class="drawer closed" id="drawer" aria-label="Shape library">
+      <div class="tabs" role="tablist">
+        <button class="tab" role="tab" data-cat="basic" aria-selected="true">Basic</button>
+        <button class="tab" role="tab" data-cat="flow" aria-selected="false">Flow</button>
+        <button class="tab" role="tab" data-cat="symbols" aria-selected="false">Symbols</button>
+        <button class="tab" role="tab" data-cat="mine" aria-selected="false">Mine</button>
+      </div>
+      <div class="tiles" id="tiles"></div>
+      <div class="foot">Tap to place in view, or drag onto the canvas.</div>
+    </aside>
+
+    <div class="bar" id="bar" hidden></div>
+    <div class="toast" id="toast" role="status"></div>
+  </div>
+</div>
+<script type="module" src="/src/main.js"></script>
+</body>
+</html>
