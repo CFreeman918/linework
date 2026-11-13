@@ -7,7 +7,7 @@ import "./style.css";
 import {
   Graph, InternalEvent, UndoManager, ConnectionConstraint, Point, StencilShape, StencilShapeRegistry,
   ModelXmlSerializer, RubberBandHandler, getDefaultPlugins, ConstraintHandler, ImageBox,
-  HandleConfig, VertexHandlerConfig, EdgeHandlerConfig
+  HandleConfig, VertexHandlerConfig, EdgeHandlerConfig, Clipboard
 } from "@maxgraph/core";
 
 /* ---------- helpers ---------- */
@@ -102,7 +102,9 @@ const view = graph.getView();
 graph.options.foldingEnabled = false;
 graph.setConnectable(false);
 graph.setAllowDanglingEdges(true);
-graph.setGridEnabled(true);
+const SNAP_KEY = "linework.snap.v1";
+let snapOn = store.get(SNAP_KEY) !== "0";
+graph.setGridEnabled(snapOn);
 graph.setGridSize(10);
 graph.setTooltips(false);
 graph.setCellsEditable(false);
@@ -196,7 +198,13 @@ const stage = $("#stage");
 function local(e) { const r = container.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; }
 function toGraph(p) { const s = view.scale, t = view.translate; return { x: p.x / s - t.x, y: p.y / s - t.y }; }
 function viewCenter() { return toGraph({ x: container.clientWidth / 2, y: container.clientHeight / 2 }); }
-const snap = (n) => Math.round(n / 10) * 10;
+const snap = (n) => snapOn ? Math.round(n / 10) * 10 : Math.round(n);
+function setSnap(on) {
+  snapOn = on; graph.setGridEnabled(on); store.set(SNAP_KEY, on ? "1" : "0");
+  container.classList.toggle("nosnap", !on);
+  toast(on ? "Snap to grid on" : "Snap to grid off");
+}
+container.classList.toggle("nosnap", !snapOn);
 
 /* ---------- insert ---------- */
 let placeOffset = 0;
@@ -600,6 +608,7 @@ function updateBar() {
     parts.push(`<span class="sep"></span>` + ["elbow", "straight", "curved"].map((k) => `<button class="chip" type="button" data-route="${k}" aria-pressed="${k === kind}">${k[0].toUpperCase() + k.slice(1)}</button>`).join(""));
     parts.push(`<span class="sep"></span>` + [["end", "→"], ["both", "↔"], ["none", "—"]].map(([k, g]) => `<button class="chip" type="button" data-arrow="${k}" aria-pressed="${k === arrows}" aria-label="Arrows: ${k}">${g}</button>`).join(""));
   }
+  if (cells.filter((c) => c.isVertex()).length > 1) parts.push(`<span class="sep"></span><button class="chip" type="button" id="b-arrange" aria-haspopup="menu">Arrange</button>`);
   if (cells.length > 1 && cells.some((c) => c.isVertex())) parts.push(`<button class="chip" type="button" id="b-group">Make symbol</button>`);
   parts.push(`<span class="sep"></span><button class="ib" type="button" id="b-dup" title="Duplicate" aria-label="Duplicate">${ic.dup}</button>`);
   parts.push(`<button class="ib" type="button" id="b-front" title="Bring to front" aria-label="Bring to front">${ic.front}</button>`);
@@ -631,6 +640,7 @@ function updateBar() {
   $("#b-ports") && ($("#b-ports").onclick = () => { portsCell = one; setMode("ports"); });
   $("#b-rot") && ($("#b-rot").onclick = () => { const st = { ...one.style }; st.rotation = ((st.rotation || 0) + 90) % 360; model.setStyle(one, st); });
   $("#b-group") && ($("#b-group").onclick = makeSymbol);
+  $("#b-arrange") && ($("#b-arrange").onclick = (e) => { const r = e.currentTarget.getBoundingClientRect(); arrangeMenu(r.left, bar.getBoundingClientRect().top - 8, true); });
   $("#b-dup").onclick = duplicate;
   $("#b-front").onclick = () => graph.orderCells(false, graph.getSelectionCells());
   $("#b-del").onclick = removeSelection;
@@ -660,13 +670,72 @@ function saveSymbol(cell, name) {
   if (cat === "mine") renderTiles();
 }
 
+/* ---------- clipboard ---------- */
+function clipBounds(cells) {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const c of cells) {
+    const g = c.geometry; if (!g || g.relative) continue;
+    const pts = c.isEdge() ? [g.sourcePoint, g.targetPoint, ...(g.points || [])].filter(Boolean) : [{ x: g.x, y: g.y }, { x: g.x + g.width, y: g.y + g.height }];
+    for (const p of pts) { x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y); x1 = Math.max(x1, p.x); y1 = Math.max(y1, p.y); }
+  }
+  return x0 === Infinity ? null : { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
+}
+function copySelection() { const n = Clipboard.copy(graph).length; if (n) toast(n === 1 ? "Copied" : `Copied ${n} items`); }
+function cutSelection() { const n = Clipboard.cut(graph, graph.getSelectionCells()).length; if (n) toast(n === 1 ? "Cut" : `Cut ${n} items`); }
+const canPaste = () => !Clipboard.isEmpty() && Clipboard.getCells().length > 0;
+/* Paste centred on `at` (graph coords). Without `at`, offset from the original
+   when it is on screen, otherwise centre in the view. */
+function pasteAt(at) {
+  if (!canPaste()) return;
+  const src = Clipboard.getCells(), b = clipBounds(src);
+  if (!at && b) {
+    const tl = toGraph({ x: 0, y: 0 }), br = toGraph({ x: container.clientWidth, y: container.clientHeight });
+    const cx = b.x + b.width / 2, cy = b.y + b.height / 2;
+    if (cx < tl.x || cx > br.x || cy < tl.y || cy > br.y) at = viewCenter();
+  }
+  if (!at || !b) { Clipboard.paste(graph); return; }
+  const dx = snap(at.x - b.width / 2) - b.x, dy = snap(at.y - b.height / 2) - b.y;
+  const cells = graph.importCells(graph.getImportableCells(src), dx, dy, graph.getDefaultParent());
+  graph.setSelectionCells(cells);
+}
+function selectAll() { setMode("select"); graph.selectAll(); }
+
+/* ---------- arrange ---------- */
+function nudge(dx, dy) {
+  const cells = graph.getMovableCells(graph.getSelectionCells());
+  if (cells.length) graph.moveCells(cells, dx, dy);
+}
+const arrangeable = () => graph.getSelectionCells().filter((c) => c.isVertex() && c.geometry);
+function distribute(horizontal) {
+  const cells = arrangeable();
+  if (cells.length < 3) { toast("Select three or more shapes to distribute"); return; }
+  const [pos, size] = horizontal ? ["x", "width"] : ["y", "height"];
+  cells.sort((a, b) => a.geometry[pos] - b.geometry[pos]);
+  const first = cells[0].geometry, last = cells[cells.length - 1].geometry;
+  const span = last[pos] + last[size] - first[pos];
+  const gap = (span - cells.reduce((s, c) => s + c.geometry[size], 0)) / (cells.length - 1);
+  graph.batchUpdate(() => {
+    let at = first[pos];
+    for (const c of cells) { const g = c.geometry.clone(); g[pos] = Math.round(at); model.setGeometry(c, g); at += g[size] + gap; }
+  });
+}
+function arrangeMenu(x, y, above = false) {
+  const al = (a) => () => graph.alignCells(a, arrangeable());
+  menu(x, y, [
+    { t: "Align left", f: al("left") }, { t: "Align centre", f: al("center") }, { t: "Align right", f: al("right") }, "-",
+    { t: "Align top", f: al("top") }, { t: "Align middle", f: al("middle") }, { t: "Align bottom", f: al("bottom") }, "-",
+    { t: "Distribute horizontally", f: () => distribute(true) }, { t: "Distribute vertically", f: () => distribute(false) },
+  ], above);
+}
+
 graph.getSelectionModel().addListener(InternalEvent.CHANGE, () => { if (mode === "ports" && !graph.isCellSelected(portsCell)) setMode("select"); else updateBar(); });
 model.addListener(InternalEvent.CHANGE, () => { scheduleSave(); syncUndo(); drawOverlay(); if (document.activeElement?.id !== "label" && document.activeElement?.id !== "symname") updateBar(); });
 graph.addListener(InternalEvent.DOUBLE_CLICK, (_s, evt) => { const c = evt.getProperty("cell"); if (c) { graph.setSelectionCell(c); focusLabel(); } evt.consume?.(); });
 
 /* ---------- menus ---------- */
 function closeMenus() { document.querySelectorAll(".menu,.scrim").forEach((m) => m.remove()); }
-function menu(x, y, items) {
+/* `above`: y is the anchor's top edge and the menu opens upward from it. */
+function menu(x, y, items, above = false) {
   closeMenus();
   const m = document.createElement("div"); m.className = "menu"; m.setAttribute("role", "menu");
   for (const it of items) {
@@ -679,7 +748,8 @@ function menu(x, y, items) {
   document.body.appendChild(m);
   const r = m.getBoundingClientRect();
   m.style.left = Math.max(8, Math.min(x, innerWidth - r.width - 8)) + "px";
-  m.style.top = Math.max(8, Math.min(y, innerHeight - r.height - 8)) + "px";
+  const h = m.getBoundingClientRect().height; // re-measure: setting left can rewrap items
+  m.style.top = Math.max(8, Math.min(above ? y - h : y, innerHeight - h - 8)) + "px";
   setTimeout(() => document.addEventListener("pointerdown", function h(ev) { if (!m.contains(ev.target)) { m.remove(); document.removeEventListener("pointerdown", h, true); } }, true), 0);
   m.querySelector("button")?.focus({ preventScroll: true });
 }
@@ -688,7 +758,8 @@ function contextMenu(cx, cy, pt) {
   if (cell) {
     if (!graph.isCellSelected(cell)) graph.setSelectionCell(cell);
     const sel = graph.getSelectionCells();
-    const items = [{ t: "Edit label", f: focusLabel }, { t: "Duplicate", f: duplicate }];
+    const items = [{ t: "Edit label", f: focusLabel }, { t: "Copy", f: copySelection }, { t: "Cut", f: cutSelection }, { t: "Duplicate", f: duplicate }];
+    if (arrangeable().length > 1) items.push({ t: "Arrange…", f: () => setTimeout(() => arrangeMenu(cx, cy), 0) });
     if (sel.length === 1 && cell.isVertex()) items.push({ t: "Connection points", f: () => { portsCell = cell; setMode("ports"); } }, { t: "Save to library", f: () => saveSymbol(cell, labelText(cell).split("\n")[0] || "My symbol") });
     if (sel.length > 1) items.push({ t: "Make symbol from selection", f: makeSymbol });
     items.push({ t: "Bring to front", f: () => graph.orderCells(false, sel) }, { t: "Send to back", f: () => graph.orderCells(true, sel) }, "-", { t: "Delete", danger: true, f: removeSelection });
@@ -696,9 +767,10 @@ function contextMenu(cx, cy, pt) {
   } else {
     const at = toGraph(pt);
     menu(cx, cy, [
+      ...(canPaste() ? [{ t: "Paste here", f: () => pasteAt(at) }] : []),
       { t: "Add text here", f: () => { insertItem(LIB.basic.find((i) => i.n === "Text"), at); focusLabel(); } },
       { t: "Add box here", f: () => insertItem(LIB.basic[1], at) },
-      { t: "Select all", f: () => graph.selectAll?.() ?? graph.setSelectionCells(graph.getDefaultParent().children || []) },
+      { t: "Select all", f: selectAll },
       { t: "Fit diagram", f: fitView },
     ]);
   }
@@ -725,6 +797,7 @@ $("#more").onclick = (e) => {
     { t: "Export SVG", f: () => exportImage("svg") },
     { t: "Export PNG", f: () => exportImage("png") },
     "-",
+    { t: snapOn ? "Snap to grid: on" : "Snap to grid: off", f: () => setSnap(!snapOn) },
     { t: "Diagram XML…", f: xmlSheet },
     { t: "Load example diagram", f: () => confirmSheet("Load the example diagram?", "This replaces what is on the canvas, and undo history starts over.", "Load example", () => { replaceModel(EXAMPLE); }) },
     "-",
@@ -818,6 +891,15 @@ document.addEventListener("keydown", (e) => {
   if (mod && e.key.toLowerCase() === "z") { e.preventDefault(); e.shiftKey ? undo.redo() : undo.undo(); syncUndo(); }
   else if (mod && e.key.toLowerCase() === "y") { e.preventDefault(); undo.redo(); syncUndo(); }
   else if (mod && e.key.toLowerCase() === "d") { e.preventDefault(); duplicate(); }
+  else if (mod && e.key.toLowerCase() === "c") { e.preventDefault(); copySelection(); }
+  else if (mod && e.key.toLowerCase() === "x") { e.preventDefault(); cutSelection(); }
+  else if (mod && e.key.toLowerCase() === "v") { e.preventDefault(); pasteAt(); }
+  else if (mod && e.key.toLowerCase() === "a") { e.preventDefault(); selectAll(); }
+  else if (e.key.startsWith("Arrow") && !mod && !graph.isSelectionEmpty()) {
+    e.preventDefault();
+    const d = e.shiftKey || !snapOn ? 1 : graph.getGridSize();
+    nudge(e.key === "ArrowLeft" ? -d : e.key === "ArrowRight" ? d : 0, e.key === "ArrowUp" ? -d : e.key === "ArrowDown" ? d : 0);
+  }
   else if (e.key === "Delete" || e.key === "Backspace") { removeSelection(); }
   else if (e.key === "Escape") { closeMenus(); setMode("select"); graph.clearSelection(); }
   else if (e.key === "c" && !mod) setMode(mode === "connect" ? "select" : "connect");

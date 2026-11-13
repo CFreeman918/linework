@@ -25,6 +25,22 @@ It runs on [maxGraph](https://github.com/maxGraph/maxGraph), the TypeScript succ
 | Long press | Context menu |
 | Double tap | Edit label |
 | Connect tool: drag between points, or tap one point then another | Draw a connector |
+| Long press on empty canvas after copying | Paste here |
+
+With two or more shapes selected, **Arrange** aligns them or spreads them out evenly. Snap to grid can be turned off in the ⋯ menu.
+
+## Keyboard
+
+| Keys | Action |
+| --- | --- |
+| Ctrl+C / Ctrl+X / Ctrl+V | Copy / cut / paste |
+| Ctrl+A | Select all |
+| Ctrl+D | Duplicate |
+| Ctrl+Z / Ctrl+Shift+Z or Ctrl+Y | Undo / redo |
+| Arrow keys | Nudge by one grid step (Shift: 1px) |
+| Delete / Backspace | Delete selection |
+| C | Toggle connect mode |
+| Esc | Back to select mode, clear selection |
 
 ## Development
 
